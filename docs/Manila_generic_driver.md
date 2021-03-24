@@ -1,0 +1,239 @@
+# Openstack Manila sử dụng Generic driver:
+
+## 1. Cài đặt package Manila trên Node Controller
+**Cài đặt Package**
+```sh
+dnf install openstack-manila openstack-manila-share python3-manilaclient
+```
+**Sửa file cấu hình với nội dung như sau:**
+```sh
+$ vim /etc/manila/manila.conf
+
+[DEFAULT]
+...
+enabled_share_backends = generic
+enabled_share_protocols = NFS
+
+[neutron]
+...
+url = http://controller:9696
+auth_uri = http://controller:5000
+auth_url = http://controller:35357
+memcached_servers = controller:11211
+auth_type = password
+project_domain_name = default
+user_domain_name = default
+region_name = RegionOne
+project_name = service
+username = neutron
+password = Welcome123
+
+[nova]
+...
+auth_uri = http://controller:5000
+auth_url = http://controller:35357
+memcached_servers = controller:11211
+auth_type = password
+project_domain_name = default
+user_domain_name = default
+region_name = RegionOne
+project_name = service
+username = nova
+password = Welcome123
+
+[cinder]
+...
+auth_uri = http://controller:5000
+auth_url = http://controller:35357
+memcached_servers = controller:11211
+auth_type = password
+project_domain_name = default
+user_domain_name = default
+region_name = RegionOne
+project_name = service
+username = cinder
+password = Welcome123
+
+[generic]
+share_backend_name = GENERIC
+share_driver = manila.share.drivers.generic.GenericShareDriver
+driver_handles_share_servers = True
+service_instance_flavor_id = 100
+service_image_name = manila-service-image
+service_instance_user = manila
+service_instance_password = manila
+#interface_driver = manila.network.linux.interface.BridgeInterfaceDriver
+interface_driver = manila.network.linux.interface.OVSInterfaceDriver
+```
+**Download image sử dụng Manila**
+```sh
+wget http://tarballs.openstack.org/manila-image-elements/images/manila-service-image-master.qcow2
+```
+**Đẩy image lên Openstack**
+```sh
+openstack image create "manila-service-image" \
+--file manila-service-image-master.qcow2 \
+--disk-format qcow2 \
+--container-format bare \
+--public
+```
+**Tạo Flavor sử dụng cho Manila**
+```sh
+openstack flavor create manila-service-flavor --id 100 --ram 1024 --disk 0 --vcpus 1
+```
+**Tạo type cho Manila**
+```sh
+manila type-create generic True
+```
+
+manila type-key generic set share_backend_name=GENERIC
+
+```sh
+$ openstack network list
++--------------------------------------+------------------+--------------------------------------+
+| ID                                   | Name             | Subnets                              |
++--------------------------------------+------------------+--------------------------------------+
+| 11b916b3-fd92-4461-adba-d3462a3126e7 | private-net      | b123b485-a97c-4703-b561-97e0b5af78c9 |       
+| 3ac0a1ce-ff6e-48fb-9b6f-562ec14e6690 | provider_network | 373ff7c1-2c3c-4164-ad8a-b08c42b21845 |
++--------------------------------------+------------------+--------------------------------------+
+```
+Với Share-network ta sẽ cần `net-id` và `subnet-id` private của project.
+
+Trước khi tạo shared-network, tenant network phải được kết nối tới Router trước, nếu không sẽ xuất hiện lỗi tương tự như sau:
+
+```sh
+$ tail -f /var/log/manila/share.log
+2020-05-19 13:03:28.265 128182 ERROR oslo_messaging.rpc.server   File "/usr/lib/python2.7/site-packages/manila/share/drivers/service_instance.py", line 9                    02, in setup_network
+2020-05-19 13:03:28.265 128182 ERROR oslo_messaging.rpc.server     neutron_net_id, neutron_subnet_id)
+2020-05-19 13:03:28.265 128182 ERROR oslo_messaging.rpc.server   File "/usr/lib/python2.7/site-packages/oslo_concurrency/lockutils.py", line 328, in inne                    r
+2020-05-19 13:03:28.265 128182 ERROR oslo_messaging.rpc.server     return f(*args, **kwargs)
+2020-05-19 13:03:28.265 128182 ERROR oslo_messaging.rpc.server   File "/usr/lib/python2.7/site-packages/manila/share/drivers/service_instance.py", line 1                    072, in _get_private_router
+2020-05-19 13:03:28.265 128182 ERROR oslo_messaging.rpc.server     _('Subnet gateway is not attached to the router.'))
+2020-05-19 13:03:28.265 128182 ERROR oslo_messaging.rpc.server ServiceInstanceException: Subnet gateway is not attached to the router.
+2020-05-19 13:03:28.265 128182 ERROR oslo_messaging.rpc.server
+2020-05-19 13:03:30.134 128181 INFO manila.share.manager [req-75f80a61-41c3-410c-8784-3345b48f3bad - - - - -] Updating share status
+2020-05-19 13:03:46.083 128182 INFO manila.share.manager [req-5ae35dda-de5f-4e3a-a1cd-5d2dbbdc26d8 - - - - -] Updating share status
+```
+Thực hiện tạo Router sau đó add network `private-network` vào Router
+
+Mình đang ở project admin do vậy sẽ lấy subnet và net id của admin là dải `private-net`
+```sh
+$ manila share-network-create --name share-net-admin --neutron-subnet-id b123b485-a97c-4703-b561-97e0b5af78c9 --neutron-net-id 11b916b3-fd92-4461-adba-d3462a3126e7
+
++-------------------+--------------------------------------+
+| Property          | Value                                |
++-------------------+--------------------------------------+
+| network_type      | None                                 |
+| name              | share-net-admin                      |
+| segmentation_id   | None                                 |
+| created_at        | 2020-08-26T10:44:14.000000           |
+| neutron_subnet_id | b123b485-a97c-4703-b561-97e0b5af78c9 |
+| updated_at        | None                                 |
+| mtu               | None                                 |
+| gateway           | None                                 |
+| neutron_net_id    | 11b916b3-fd92-4461-adba-d3462a3126e7 |
+| ip_version        | None                                 |
+| cidr              | None                                 |
+| project_id        | 0b982dc111654a87a8fef066a610ce61     |
+| id                | 053e781d-879c-462f-9092-26c631a50db1 |
+| description       | None                                 |
++-------------------+--------------------------------------+
+```
+**Tạo volume share network**
+```sh
+manila create --share-type generic --name share-01  --share-network share-net-admin  nfs 1
+```
+Kiểm tra thông tin
+```sh
+$ openstack share show share-01
+
++---------------------------------------+-----------------------------------------------------------------------+
+| Field                                 | Value                                                                 |
++---------------------------------------+-----------------------------------------------------------------------+
+| access_rules_status                   | error                                                                 |
+| availability_zone                     | nova                                                                  |
+| create_share_from_snapshot_support    | False                                                                 |
+| created_at                            | 2020-08-26T10:45:02.000000                                            |
+| description                           | None                                                                  |
+| export_locations                      |                                                                       |
+|                                       | id = fe600b80-3527-41e2-b7d5-9c379a496f06                             |
+|                                       | path = 10.254.0.11:/shares/share-a44971c6-7bb4-4d79-ab1d-79670b843abc |
+|                                       | preferred = False                                                     |
+|                                       | share_instance_id = a44971c6-7bb4-4d79-ab1d-79670b843abc              |
+|                                       | is_admin_only = False                                                 |
+|                                       | id = 12c2586c-fa6c-4a08-a90e-8deac3d1d871                             |
+|                                       | path = 10.254.0.11:/shares/share-a44971c6-7bb4-4d79-ab1d-79670b843abc |
+|                                       | preferred = False                                                     |
+|                                       | share_instance_id = a44971c6-7bb4-4d79-ab1d-79670b843abc              |
+|                                       | is_admin_only = True                                                  |
+| has_replicas                          | False                                                                 |
+| host                                  | controller03.vinhduc.hn@generic#GENERIC                               |
+| id                                    | c0f6a773-e443-4065-90b0-6ed456734007                                  |
+| is_public                             | False                                                                 |
+| mount_snapshot_support                | False                                                                 |
+| name                                  | share-01                                                              |
+| progress                              | 100%                                                                  |
+| project_id                            | 0b982dc111654a87a8fef066a610ce61                                      |
+| properties                            |                                                                       |
+| replication_type                      | None                                                                  |
+| revert_to_snapshot_support            | False                                                                 |
+| share_group_id                        | None                                                                  |
+| share_network_id                      | 053e781d-879c-462f-9092-26c631a50db1                                  |
+| share_proto                           | NFS                                                                   |
+| share_server_id                       | 5a9892bd-9e96-4d98-8c4a-c15197ec6b2e                                  |
+| share_type                            | 9834789e-fac9-420a-beee-c7a938faf109                                  |
+| share_type_name                       | generic                                                               |
+| size                                  | 1                                                                     |
+| snapshot_id                           | None                                                                  |
+| snapshot_support                      | False                                                                 |
+| source_share_group_snapshot_member_id | None                                                                  |
+| status                                | available                                                             |
+| task_state                            | None                                                                  |
+| user_id                               | 92599364446645c49cd27d11625b0a46                                      |
+| volume_type                           | generic                                                               |
++---------------------------------------+-----------------------------------------------------------------------+
+```
+**Cho phep may ao IP 192.168.1.10 mount FS**
+```sh
+manila access-allow --access-level rw share-01 ip 192.168.1.10
+```
+```sh
+$ manila access-list share-01
+
++--------------------------------------+-------------+-----------------+--------------+--------+------------+----------------------------+------------+
+| id                                   | access_type | access_to       | access_level | state  | access_key | created_at                 | updated_at |
++--------------------------------------+-------------+-----------------+--------------+--------+------------+----------------------------+------------+
+| 075a37a0-185e-493f-8638-8b934689237b | ip          | 192.168.1.10    | rw           | active | None       | 2020-08-27T03:45:06.000000 | None       |
++--------------------------------------+-------------+-----------------+--------------+--------+------------+----------------------------+------------+
+```
+***Các access list của share-01 được đặt trong VM share, ta có thể kiểm tra bằng cách ssh vào share VM, user:manila, pass:manila***
+```sh
+$ cat /etc/exports 
+
+/shares/share-ee8315bf-14bd-4f80-a158-71978f4fab39	192.168.1.10(rw,sync,wdelay,hide,nocrossmnt,secure,no_root_squash,no_all_squash,no_subtree_check,secure_locks,acl,anonuid=65534,anongid=65534,sec=sys,rw,no_root_squash,no_all_squash)
+```
+## 2. Kiểm tra hoạt động
+Tren máy ảo CentOS
+```sh
+yum install nfs-utils -y
+```
+Trên máy ảo Ubuntu
+```sh
+apt-get install nfs-common -y
+```
+**Thực hiện mount file**
+```sh
+$ mount -t nfs 10.254.0.11:/shares/share-a44971c6-7bb4-4d79-ab1d-79670b843abc /mnt/
+$ vim /etc/fstab
+10.254.0.11:/shares/share-a44971c6-7bb4-4d79-ab1d-79670b843abc /mnt/ nfs rw,hard,intr,rsize=8192,wsize=8192,timeo=14 0 0
+```
+
+## 3. Một số lưu ý
+- Khi tạo volume share, nếu thực hiện resize (Tăng hoặc giảm kích thước volume-share), dưới cinder sẽ thực hiện việc resize volume (gỡ, thay đổi kích thước, gắn lại volume). Do đó client sẽ phải thực hiện `umount` sau đó `mount` lại với đường dẫn cũ để áp dụng thay đổi
+- Khi volume-share đã có dữ liệu thì có thể tăng kích thước volume nhưng không thể giảm kích thước volume thấp hơn dung lượng volume đã chứa dữ liệu.
+
+## Tài liệu tham khảo
+- https://docs.openstack.org/manila/ussuri/install/install-share-rdo.html
+- https://www.server-world.info/en/note?os=CentOS_8&p=openstack_ussuri3&f=3
+- https://github.com/longsube/ghichep-OpenStack/blob/master/14-Manila/manila_generic_driver.md
+- https://blog.csdn.net/weixin_43905458/article/details/106456074
